@@ -1,8 +1,8 @@
 <?php
 
-function uglify($code){
-    require './parse-js.php';
-    require './--process.php';
+function uglify($code) {
+    require __DIR__ . '/parse-js.php';
+    require __DIR__ . '/--process.php';
 
     $ast = $parse($code);
     $ast = $ast_mangle($ast);
@@ -10,4 +10,8 @@ function uglify($code){
     $ast = $ast_squeeze_more($ast);
     $final_code = $strip_lines($gen_code($ast), 0); // compressed code here
     return $final_code;
+}
+
+if (!class_exists('\PHPUnit_Framework_TestCase') && class_exists('\PHPUnit\Framework\TestCase')) {
+    class_alias('\PHPUnit\Framework\TestCase', '\PHPUnit_Framework_TestCase');
 }

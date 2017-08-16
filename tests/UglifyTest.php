@@ -1,16 +1,14 @@
 <?php
 
-use PHPUnit\Framework\TestCase;
-
-class UglifyTest extends TestCase
+class UglifyTest extends PHPUnit_Framework_TestCase
 {
     /**
      * @dataProvider getTester
      */
     public function testJs($file)
     {
-        $test = file_get_contents('./test/' . $file);
-        $expected = file_get_contents('./expected/' . $file);
+        $test = file_get_contents(__DIR__ . '/test/' . $file);
+        $expected = file_get_contents(__DIR__ . '/expected/' . $file);
 
         $test = uglify($test);
         $expected = trim($expected);
@@ -22,7 +20,7 @@ class UglifyTest extends TestCase
     {
         $tests = [];
 
-        $t = opendir('./test/');
+        $t = opendir(__DIR__ . '/test/');
         while (false !== ($file = readdir($t))) $tests[] = (array)$file;
         closedir($t);
 
