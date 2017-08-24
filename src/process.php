@@ -246,8 +246,10 @@ $ast_walker = function () use ($MAP) {
 
 /* -----[ Scope and mangling ]----- */
 
-$base54 = function ($num) {
-    static $DIGITS = 'etnrisouaflchpdvmgybwESxTNCkLAOM_DPHBjFIqRUzWXV$JKQGYZ0516372984';
+if (!isset($DIGITS))
+    $DIGITS = 'etnrisouaflchpdvmgybwESxTNCkLAOM_DPHBjFIqRUzWXV$JKQGYZ0516372984';
+
+$base54 = function ($num) use ($DIGITS) {
     $ret = ''; $base = 54;
     do {
         $ret .= $DIGITS[$num % $base];
@@ -1681,7 +1683,7 @@ $make_string = function ($str, $ascii_only = false) use ($to_ascii) {
     else return '"' . str_replace('"', '\\"', $str) . '"';
 };
 
-$strip_lines = function ($code, $max_line_length) {
+$strip_lines = function ($code, $max_line_length = 0) {
     $lines = explode("\n", $code);
     if (!$max_line_length) return join($lines);
     $a = []; $new_line = '';
