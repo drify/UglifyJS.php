@@ -852,6 +852,7 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         $can_insert_semicolon,
         $semicolon
     ) {
+        $name = null;
         if (!$can_insert_semicolon()) {
             $name = $is("name") ? $S['token']['value'] : null;
         }
