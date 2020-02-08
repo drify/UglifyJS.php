@@ -33,6 +33,7 @@ $KEYWORDS = $array_to_hash([
     "break",
     "case",
     "catch",
+    "class",
     "const",
     "continue",
     "debugger",
@@ -40,14 +41,18 @@ $KEYWORDS = $array_to_hash([
     "delete",
     "do",
     "else",
+    "extends",
     "finally",
     "for",
     "function",
     "if",
     "in",
     "instanceof",
+    "let",
     "new",
+    "of",
     "return",
+    "static",
     "switch",
     "throw",
     "try",
@@ -63,11 +68,9 @@ $RESERVED_WORDS = $array_to_hash([
     "boolean",
     "byte",
     "char",
-    "class",
     "double",
     "enum",
     "export",
-    "extends",
     "final",
     "float",
     "goto",
@@ -82,7 +85,6 @@ $RESERVED_WORDS = $array_to_hash([
     "protected",
     "public",
     "short",
-    "static",
     "super",
     "synchronized",
     "throws",
@@ -115,6 +117,7 @@ $RE_DEC_NUMBER = '/^\d*\.?\d*(?:e[+-]?\d*(?:\d\.?|\.?\d)\d*)?$/i';
 $OPERATORS = $array_to_hash([
     "in",
     "instanceof",
+    "of",
     "typeof",
     "new",
     "void",
@@ -156,7 +159,8 @@ $OPERATORS = $array_to_hash([
     "^=",
     "&=",
     "&&",
-    "||"
+    "||",
+    "=>"
 ]);
 
 //$WHITESPACE_CHARS = $array_to_hash($characters(json_decode('" \u00a0\n\r\t\f\u000b\u200b\u180e\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u202f\u205f\u3000\uFEFF"'), false));
@@ -702,6 +706,10 @@ $tokenizer = function ($TEXT) use (
 
 };
 
+
+//List of names that shouldn't be mangled
+$doNotMangle = [];
+
 /* -----[ Parser ]----- */
 
 // Remove unknown codes NodeWithToken, embed_tokens, maybe_embed_tokens
@@ -717,9 +725,9 @@ $parse = function ($TEXT, $exigent_mode = false) use (
     $curry,
     $prog1,
     $js_error,
-    $is_token
+    $is_token,
+    &$doNotMangle
 ) {
-
     $S = [
         'input'         => is_string($TEXT) ? $tokenizer($TEXT, true) : $TEXT,
         'token'         => null,
@@ -771,7 +779,7 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         $token_error($token, "Unexpected token: " . $token['type'] . " (" . $token['value'] . ")");
     };
 
-    $expect_token = function ($type, $val) use (&$S, $is, $next, $token_error) {
+    $expect_token = function ($type, $val = null) use (&$S, $is, $next, $token_error) {
         if ($is($type, $val)) {
             return $next();
         }
@@ -780,10 +788,11 @@ $parse = function ($TEXT, $exigent_mode = false) use (
 
     $expect = function ($punc) use ($expect_token) { return $expect_token("punc", $punc); };
 
-    $can_insert_semicolon = function () use (&$S, $is, $exigent_mode) {
-        return !$exigent_mode && (
+    $forceSemicolon = false;
+    $can_insert_semicolon = function () use (&$S, $is, $exigent_mode, &$forceSemicolon) {
+        return $forceSemicolon || (!$exigent_mode && (
             $S['token']['nlb'] || $is("eof") || $is("punc", "}")
-        );
+        ));
     };
 
     $semicolon = function () use ($is, $next, $unexpected, $can_insert_semicolon) {
@@ -840,6 +849,10 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         return [ "var", $vardefs($no_in) ];
     };
 
+    $let_ = function ($no_in = false) use ($vardefs) {
+        return [ "let", $vardefs($no_in) ];
+    };
+
     $const_ = function () use ($vardefs) {
         return [ "const", $vardefs() ];
     };
@@ -871,6 +884,33 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         return [ "stat", $prog1($expression, $semicolon) ];
     };
 
+    $parenthesis_is_arrow_function = function ($pos) use ($S, $tokenizer, $TEXT) {  //It's very important to capture $S by value, because we want to initialize $extra_S to the beginning of the file, otherwise some variables will be set to the current position and others will be set to the beginning of the file which will cause problems.
+        $extra_S = $S;
+        $extra_S['input'] = is_string($TEXT) ? $tokenizer($TEXT, true) : $TEXT; //We want to know whether the token after the parentheses is a => in order to know if this is a function or a simple statement. To do this, we need to peek several tokens ahead, so we need to create a copy of $S to be able to see what's ahead without actually setting the value in $S to that. The copy should use a new $tokenizer object in order to avoid messing with the existing one.
+        while(true){    //Put $extra_S at the right starting position, since it's initially at the beginning of the file. This loop will be exited by a break statement. This is because we only want to call $extra_S['input'][0]() once per loop so we need to store that value in a variable, which we can only do in the loop body.
+            $token = $extra_S['input'][0]();
+            if($token['pos'] >= $pos || $token['type'] == "eof"){
+                break;
+            }
+        }
+        $parenthesesCount = 1;
+        do{
+            $token = $extra_S['input'][0]();
+            if($token['type'] == "eof"){
+                break;  //If this is an end of file, exit the loop (this is invalid code, but the error will be thrown later)
+            }
+            switch($token['value']){
+                case "(":
+                    $parenthesesCount++;
+                    break;
+                case ")":
+                    $parenthesesCount--;
+                    break;
+            }
+        } while($parenthesesCount > 0); //Loop until we get out of the parentheses to see if the token after that is a =>
+        return $extra_S['input'][0]()['value'] == "=>";
+    };
+
     $statement = function () use (
         &$S,
         $is,
@@ -886,6 +926,7 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         $prog1,
         $is_token,
         $var_,
+        $let_,
         $const_,
         $break_cont,
         $simple_statement,
@@ -893,11 +934,13 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         &$labeled_statement,
         &$for_,
         &$function_,
+        &$class_,
         &$if_,
         &$block_,
         &$switch_block_,
         &$try_,
-        &$expression
+        &$expression,
+        $parenthesis_is_arrow_function
     ) {
         if ($is("operator", "/") || $is("operator", "/=")) {
             $S['peeked'] = null;
@@ -916,9 +959,15 @@ $parse = function ($TEXT, $exigent_mode = false) use (
             return $simple_statement();
 
           case "name":
-            return $is_token($peek(), "punc", ":")
-                ? $labeled_statement($prog1($S['token']['value'], $next, $next))
-                : $simple_statement();
+            if($is_token($peek(), "punc", ":")){
+                return $labeled_statement($prog1($S['token']['value'], $next, $next));
+            }
+            else if($is_token($peek(), "operator", "=>")){
+                return $function_(false, true);
+            }
+            else{
+                return $simple_statement();
+            }
 
           case "punc":
             switch ($S['token']['value']) {
@@ -926,7 +975,7 @@ $parse = function ($TEXT, $exigent_mode = false) use (
                 return [ "block", $block_() ];
               case "[":
               case "(":
-                return $simple_statement();
+                return $parenthesis_is_arrow_function($S['token']['pos']) ? $function_(false, true) : $simple_statement();
               case ";":
                 $next();
                 return [ "block" ];
@@ -938,6 +987,9 @@ $parse = function ($TEXT, $exigent_mode = false) use (
             switch ($prog1($S['token']['value'], $next)) {
               case "break":
                 return $break_cont("break");
+
+              case "class":
+                return $class_();
 
               case "continue":
                 return $break_cont("continue");
@@ -990,6 +1042,9 @@ $parse = function ($TEXT, $exigent_mode = false) use (
               case "var":
                 return $prog1($var_, $semicolon);
 
+              case "let":
+                return $prog1($let_, $semicolon);
+
               case "const":
                 return $prog1($const_, $semicolon);
 
@@ -1035,18 +1090,18 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         return [ "for", $init, $test, $step, $in_loop($statement) ];
     };
 
-    $for_in = function ($init) use (
+    $for_in = function ($init, $operator) use (
         $next,
         $expect,
         $in_loop,
         $statement,
         &$expression
     ) {
-        $lhs = $init[0] === "var" ? [ "name", $init[1][0][0] ] : $init;
+        $lhs = ($init[0] === "var" || $init[0] === "let") ? [ "name", $init[1][0][0] ] : $init;
         $next();
         $obj = $expression();
         $expect(")");
-        return [ "for-in", $init, $lhs, $obj, $in_loop($statement) ];
+        return [ "for-$operator", $init, $lhs, $obj, $in_loop($statement) ];
     };
 
     $for_ = function () use (
@@ -1055,6 +1110,7 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         $croak,
         $expect,
         $var_,
+        $let_,
         $regular_for,
         $for_in,
         &$expression
@@ -1062,13 +1118,30 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         $expect("(");
         $init = null;
         if (!$is("punc", ";")) {
-            $init = $is("keyword", "var")
-                ? call_user_func(function () use ($next, $var_) { $next(); return $var_(true); })
-                : $expression(true, true);
+            if($is("keyword", "var")){
+                $init = call_user_func(function () use ($next, $var_) {
+                    $next();
+                    return $var_(true);
+                });
+            }
+            else if($is("keyword", "let")){
+                $init = call_user_func(function () use ($next, $let_) {
+                    $next();
+                    return $let_(true);
+                });
+            }
+            else{
+                $init = $expression(true, true);
+            }
             if ($is("operator", "in")) {
-                if ($init[0] === "var" && count($init[1]) > 1)
+                if (($init[0] === "var" || $init[0] === "let") && count($init[1]) > 1)
                     $croak("Only one variable declaration allowed in for..in loop");
-                return $for_in($init);
+                return $for_in($init, "in");
+            }
+            else if ($is("operator", "of")) {
+                if (($init[0] === "var" || $init[0] === "let") && count($init[1]) > 1)
+                    $croak("Only one variable declaration allowed in for..of loop");
+                return $for_in($init, "of");
             }
         }
         return $regular_for($init);
@@ -1125,43 +1198,182 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         return $a;
     });
 
-    $function_ = function ($in_statement) use (
+    $function_ = function ($in_statement, $isArrowFunction = false) use (
         &$S,
         $prog1,
         $is,
         $next,
         $unexpected,
         $expect,
-        $block_
+        $block_,
+        &$doNotMangle,
+        $statement,
+        &$forceSemicolon
     ) {
-        $name = $is("name") ? $prog1($S['token']['value'], $next) : null;
+        if($isArrowFunction){
+            $name = null;
+        }
+        else{
+            $name = $is("name") ? $prog1($S['token']['value'], $next) : null;
+        }
         if ($in_statement && !$name)
             $unexpected();
-        $expect("(");
-        return [ $in_statement ? "defun" : "function",
+        if(!$isArrowFunction){
+            $expect("(");
+        }
+        else if($is("punc", "(")){
+            $next();
+        }
+        return [ $in_statement ? "defun" : ($isArrowFunction ? "arrowfunction" : "function"),
                  $name,
                  // arguments
-                 call_user_func(function ($first, $a) use (&$S, $is, $next, $unexpected, $expect) {
-                     while (!$is("punc", ")")) {
-                         if ($first) $first = false; else $expect(",");
-                         if (!$is("name")) $unexpected();
-                         $a[] = $S['token']['value'];
-                         $next();
+                 call_user_func(function ($first, $a) use (&$S, $is, $next, $unexpected, $expect, &$doNotMangle) {
+                     $isAfterEqualSign = false;
+                     $stuffAfterEqualSign = "";
+                     $parenthesesCount = 0;
+                     while ((!$is("punc", ")") || $parenthesesCount > 0) && !$is("eof")) {
+                        if($is("operator", "=")){
+                            $isAfterEqualSign = true;
+                        }
+                        else if($isAfterEqualSign){
+                            switch($S["token"]["value"]){
+                            case "(":
+                            case "[":
+                            case "{":
+                                $parenthesesCount++;
+                                break;
+                            case ")":
+                            case "]":
+                            case "}":
+                                $parenthesesCount--;
+                                break;
+                            }
+                        }
+                        else if($isAfterEqualSign && $parenthesesCount == 0 && $is("punc", ",")){
+                            $a[] = $stuffAfterEqualSign;
+                            $stuffAfterEqualSign = "";
+                            $isAfterEqualSign = false;
+                        }
+                        if(!$isAfterEqualSign){ //Don't check the stuff after the equal sign in an optional parameter
+                            if($S["token"]["value"] == "=>"){
+                                break;
+                            }
+                            else if ($first){
+                                $first = false;
+                            }
+                            else{
+                                $expect(",");
+                            }
+                            if (!$is("name")){
+                                $unexpected();
+                            }
+                            $a[] = $S['token']['value'];
+                        }
+                        else{
+                            if($is("name")){
+                                //Names that appear in optional parameters shouldn't be mangled (The best thing would be to mangle them and then put their mangled names in the optional parameters instead of the original names, but I'm not the original author of this code, I just added some parts to support optional parameters, so I have no idea how to do that. If anyone sees this comment and knows how to do that, please do.)
+                                $doNotMangle[] = $S['token']['value'];
+                            }
+
+                            if($S['token']['value'] == "true"){
+                                $stuffAfterEqualSign .= "!0";
+                            }
+                            else if($S['token']['value'] == "false"){
+                                $stuffAfterEqualSign .= "!1";
+                            }
+                            else if($S['token']['value'] == "undefined"){
+                                $stuffAfterEqualSign .= "void 0";
+                            }
+                            else if($is("string")){ //Strings are stored decoded and not as they appear in the file, so to add quotes, escape special characters, etc we need to use json_encode
+                                $stuffAfterEqualSign .= json_encode($S['token']['value']);
+                            }
+                            else{
+                                $stuffAfterEqualSign .= $S['token']['value'];
+                            }
+                        }
+                        $next();
                      }
                      $next();
+                     if($S['token']['value'] == "=>"){
+                        $next();
+                     }
+                     if($isAfterEqualSign){
+                        $a[] = $stuffAfterEqualSign;
+                     }
                      return $a;
                  }, true, []),
                  // body
-                 call_user_func(function () use (&$S, $block_) {
+                 call_user_func(function () use (&$S, $block_, $statement, $isArrowFunction, &$forceSemicolon) {
                      ++$S['in_function'];
                      $loop = $S['in_loop'];
                      $S['in_directives'] = true;
                      $S['in_loop'] = 0;
-                     $a = $block_();
+                     if(!$isArrowFunction || $S['token']['value'] == "{"){
+                         $a = $block_();
+                     }
+                     else{
+                        $forceSemicolon = true;
+                        $a = [$statement()];
+                        $a[0][0] = "return";    //Arrow functions with only one expression outside of curly brackets should return that expression
+                        $forceSemicolon = false;
+                     }
                      --$S['in_function'];
                      $S['in_loop'] = $loop;
                      return $a;
                  }) ];
+    };
+
+    $class_ = function () use (
+        &$S,
+        $prog1,
+        $is,
+        $next,
+        $expect,
+        $function_,
+        $token_error,
+        &$doNotMangle
+    ) {
+        $name = $is("name") ? $prog1($S['token']['value'], $next) : null;
+        if($is("keyword", "extends")){
+            $next();
+            if(!$is("name")){
+                $token_error($S['token'], "Unexpected token " . $S['token']['type'] . ", expected name");
+            }
+            $extends = [$prog1($S['token']['value'], $next)];
+            $doNotMangle[] = $extends[0];
+        }
+        else{
+            $extends = [];
+        }
+        $expect("{");
+        $body = [];
+        while (!$is("punc", "}") && !$is("eof")) {
+            if($is("keyword", "static")){
+                $next();
+                $method = $function_(true);
+                $method[1] = "static " . $method[1];
+            }
+            else if(!$is("name")){
+                $token_error($S['token'], "Unexpected token " . $S['token']['type'] . ", expected name");
+            }
+            else if($is("name", "get")){
+                $next();
+                $method = $function_(true);
+                $method[1] = "get " . $method[1];
+            }
+            else if($is("name", "set")){
+                $next();
+                $method = $function_(true);
+                $method[1] = "set " . $method[1];
+            }
+            else{
+                $method = $function_(true);
+                $method[1] = "method " . $method[1];    //Prepend "method " to the name so that we can easily see that this name shouldn't be mangled. The "method " part will be deleted when outputting the name.
+            }
+            $body[] = $method;
+        }
+        $next();
+        return ["class", $name, $extends, $body];
     };
 
     $try_ = function () use (
@@ -1243,11 +1455,14 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         $unexpected,
         $expect,
         $function_,
+        $class_,
         $new_,
         $array_,
         &$object_,
         &$subscripts,
-        &$expression
+        &$expression,
+        $peek,
+        $parenthesis_is_arrow_function
     ) {
         if ($is("operator", "new")) {
             $next();
@@ -1256,8 +1471,13 @@ $parse = function ($TEXT, $exigent_mode = false) use (
         if ($is("punc")) {
             switch ($S['token']['value']) {
               case "(":
-                $next();
-                return $subscripts($prog1($expression, $curry($expect, ")")), $allow_calls);
+                if($parenthesis_is_arrow_function($S['token']['pos'])){
+                    return $function_(false, true);
+                }
+                else{
+                    $next();
+                    return $subscripts($prog1($expression, $curry($expect, ")")), $allow_calls);
+                }
               case "[":
                 $next();
                 return $subscripts($array_(), $allow_calls);
@@ -1267,9 +1487,16 @@ $parse = function ($TEXT, $exigent_mode = false) use (
             }
             $unexpected();
         }
+        if($peek()["value"] == "=>"){
+            return $subscripts($function_(false, true), $allow_calls);
+        }
         if ($is("keyword", "function")) {
             $next();
             return $subscripts($function_(false), $allow_calls);
+        }
+        if ($is("keyword", "class")) {
+            $next();
+            return $subscripts($class_(), $allow_calls);
         }
         if (isset($ATOMIC_START_TOKEN[$S['token']['type']])) {
             $atom = $S['token']['type'] === "regexp"
