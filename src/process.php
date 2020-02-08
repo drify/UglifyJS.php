@@ -58,6 +58,9 @@ $ast_walker = function () use ($MAP) {
         if ($ast === null)
             return null;
         try {
+            if(is_string($ast)){
+                return $ast;
+            }
             $stack[] = $ast;
             $type = $ast[0];
             $gen = isset($user[$type]) ? $user[$type] : null;
@@ -107,6 +110,7 @@ $ast_walker = function () use ($MAP) {
         "block" => $_block,
         "splice" => $_block, // removed
         "var" => $_vardefs,
+        "let" => $_vardefs,
         "const" => $_vardefs,
         "try" => function($_this_0, $t, $c = null, $f = null) use ($MAP, $walk) {
             return [
@@ -149,6 +153,12 @@ $ast_walker = function () use ($MAP) {
         "function" => function($_this_0, $name, $args, $body) use ($MAP, $walk) {
             return [ $_this_0, $name, $args, $MAP($body, $walk) ];
         },
+        "arrowfunction" => function($_this_0, $name, $args, $body) use ($MAP, $walk) {
+            return [ $_this_0, $name, $args, $MAP($body, $walk) ];
+        },
+        "class" => function($_this_0, $name, $extends, $body) use ($MAP, $walk) {
+            return [ $_this_0, $name, $extends, $body ];
+        },
         "debugger" => function($_this_0) {
             return [ $_this_0 ];
         },
@@ -162,6 +172,9 @@ $ast_walker = function () use ($MAP) {
             return [ $_this_0, $walk($init), $walk($cond), $walk($step), $walk($block) ];
         },
         "for-in" => function($_this_0, $vvar, $key, $hash, $block) use ($walk) {
+            return [ $_this_0, $walk($vvar), $walk($key), $walk($hash), $walk($block) ];
+        },
+        "for-of" => function($_this_0, $vvar, $key, $hash, $block) use ($walk) {
             return [ $_this_0, $walk($vvar), $walk($key), $walk($hash), $walk($block) ];
         },
         "while" => function($_this_0, $cond, $block) use ($walk) {
@@ -395,7 +408,7 @@ $ast_add_scope = function ($ast) use ($MAP, $ast_walker, $Scope) {
     };
 
     $_lambda = function ($_this_0, $name, $args, $body) use ($MAP, $walk, $with_new_scope, $define) {
-        $is_defun = $_this_0 === "defun";
+        $is_defun = $_this_0 === "defun" || $_this_0 === "class";
         return [ $_this_0, $is_defun ? $define($name, "defun") : $name, $args,
         $with_new_scope(function () use ($MAP, $walk, $define, $name, $args, $body, $is_defun) {
             if (!$is_defun) $define($name, "lambda");
@@ -434,7 +447,9 @@ $ast_add_scope = function ($ast) use ($MAP, $ast_walker, $Scope) {
         // process AST
         $ret = $w['with_walkers']([
             "function" => $_lambda,
+            "arrowfunction" => $_lambda,
             "defun" => $_lambda,
+            "class" => $_lambda,
             "label" => function($_this_0, $name, $stat) use (&$current_scope) { $current_scope['labels']['define']($name); },
             "break" => $_breacont,
             "continue" => $_breacont,
@@ -443,6 +458,7 @@ $ast_add_scope = function ($ast) use ($MAP, $ast_walker, $Scope) {
                     $s['uses_with'] = true;
             },
             "var" => $_vardefs("var"),
+            "let" => $_vardefs("let"),
             "const" => $_vardefs("const"),
             "try" => function($_this_0, $t, $c = null, $f = null) use ($MAP, $walk, $define) {
                 if ($c !== null) return [
@@ -504,7 +520,8 @@ $ast_mangle = function ($ast, $options = []) use (
     $MAP_at_top,
     $ast_walker,
     $defaults,
-    $ast_add_scope
+    $ast_add_scope,
+    &$doNotMangle
 ) {
     $w = $ast_walker(); $walk = $w['walk']; $scope = null;
     $options = $defaults($options, [
@@ -515,7 +532,10 @@ $ast_mangle = function ($ast, $options = []) use (
         'no_functions' => false
     ]);
 
-    $get_mangled = function ($name, $newMangle = false) use ($HOP, $options, &$scope) {
+    $get_mangled = function ($name, $newMangle = false) use ($HOP, $options, &$scope, &$doNotMangle) {
+        if(preg_match("/^(method|get|set|static) /", $name)) return $name;  //Do not mangle names of class methods
+        if($name[0] == '=') return $name;   //don't mangle default function parameters (for example in function f(x = 3), don't mangle " = 3")
+        if(in_array($name, $doNotMangle)) return $name; //don't magnle names that are in the $doNotMangle list
         if (!$options['mangle']) return $name;
         if (!$options['toplevel'] && !$scope['parent']) return $name; // don't mangle toplevel
         if ($options['except'] && in_array($name, $options['except']))
@@ -556,7 +576,7 @@ $ast_mangle = function ($ast, $options = []) use (
 
     $_lambda = function ($_this_0, $name, $args, $body) use ($MAP, $options, $walk, &$scope, $get_mangled, $with_scope) {
         if (!$options['no_functions'] && $options['mangle']) {
-            $is_defun = $_this_0 === "defun"; $extra = null;
+            $is_defun = $_this_0 === "defun" || $_this_0 === "class"; $extra = null;
             if ($name) {
                 if ($is_defun) $name = $get_mangled($name);
                 elseif ($body['scope']['references']($name)) {
@@ -588,6 +608,7 @@ $ast_mangle = function ($ast, $options = []) use (
 
     return $w['with_walkers']([
         "function" => $_lambda,
+        "arrowfunction" => $_lambda,
         "defun" => function($_this_0) use ($MAP_at_top, $w, $_lambda) {
             // move function declarations to the top when
             // they are not in some block.
@@ -595,11 +616,14 @@ $ast_mangle = function ($ast, $options = []) use (
             switch ($w['parent']()[0]) {
               case "toplevel":
               case "function":
+              case "arrowfunction":
               case "defun":
+              case "class":
                 return $MAP_at_top($ast);
             }
             return $ast;
         },
+        "class" => $_lambda,
         "label" => function($_this_0, $label, $stat) use ($walk, &$scope) {
             if (isset($scope['labels']['refs'][$label])) return [
                 $_this_0,
@@ -611,6 +635,7 @@ $ast_mangle = function ($ast, $options = []) use (
         "break" => $_breacont,
         "continue" => $_breacont,
         "var" => $_vardefs,
+        "let" => $_vardefs,
         "const" => $_vardefs,
         "name" => function($_this_0, $name) use ($get_mangled, $get_define) {
             return $get_define($name) ?: [ $_this_0, $get_mangled($name) ];
@@ -1097,6 +1122,8 @@ $prepare_ifs = function ($ast) use ($MAP, $ast_walker, $aborts) {
     return $w['with_walkers']([
         "defun" => $redo_if_lambda,
         "function" => $redo_if_lambda,
+        "arrowfunction" => $redo_if_lambda,
+        "class" => $redo_if_lambda,
         "block" => $redo_if_block,
         "toplevel" => function($_this_0, $statements) use ($redo_if) {
             return [ $_this_0, $redo_if($statements) ];
@@ -1233,6 +1260,7 @@ $squeeze_1 = function ($ast, $options = []) use (
         $statements = call_user_func(function ($a, $prev) use ($statements) {
             array_walk($statements, function ($cur) use (&$a, &$prev) {
                 if ($prev && (($cur[0] === "var" && $a[$prev - 1][0] === "var") ||
+                              ($cur[0] === "let" && $a[$prev - 1][0] === "let") ||
                               ($cur[0] === "const" && $a[$prev - 1][0] === "const"))) {
                     $a[$prev - 1][1] = array_merge($a[$prev - 1][1], $cur[1]);
                 } else {
@@ -1258,10 +1286,10 @@ $squeeze_1 = function ($ast, $options = []) use (
                 $warn_unreachable
             ) {
                 if ($has_quit) {
-                    if ($st[0] === "function" || $st[0] === "defun") {
+                    if ($st[0] === "function" || $st[0] === "arrowfunction" || $st[0] === "defun" || $st[0] === "class") {
                         $a[] = $st;
                     }
-                    elseif ($st[0] === "var" || $st[0] === "const") {
+                    elseif ($st[0] === "var" || $st[0] === "let" || $st[0] === "const") {
                         if (!$options['no_warnings'])
                             $warn("Variables declared in unreachable code");
                         $st[1] = $MAP($st[1], function ($def) use ($options, $warn_unreachable) {
@@ -1452,7 +1480,9 @@ $squeeze_1 = function ($ast, $options = []) use (
             }) ];
         },
         "function" => $_lambda,
+        "arrowfunction" => $_lambda,
         "defun" => $_lambda,
+        "class" => $_lambda,
         "block" => function($_this_0, $body = null) use ($rmblock, $tighten) {
             if ($body !== null) return $rmblock([ "block", $tighten($body) ]);
         },
@@ -1559,7 +1589,9 @@ $squeeze_2 = function ($ast, $options = []) use (
             return [ $_this_0, $with_scope($_this_scope, $curry($MAP, $body, $walk)) ];
         },
         "function" => $lambda,
-        "defun" => $lambda
+        "arrowfunction" => $lambda,
+        "defun" => $lambda,
+        "class" => $lambda
     ], function() use ($ast, $walk, $ast_add_scope) {
         return $walk($ast_add_scope($ast));
     });
@@ -1593,7 +1625,9 @@ $ast_squeeze_more = function ($ast) use (
             return [ $_this_0, $with_scope($_this_scope, $curry($MAP, $body, $walk)) ];
         },
         "function" => $_lambda,
+        "arrowfunction" => $_lambda,
         "defun" => $_lambda,
+        "class" => $_lambda,
         "new" => function($_this_0, $ctor, $args) use ($walk, &$scope) {
             if ($ctor[0] === "name") {
                 if ($ctor[1] === "Array" && !$scope['has']("Array")) {
@@ -1890,7 +1924,7 @@ $gen_code = function ($ast, $options = []) use (
                 $b = $b[3];
             }
             elseif ($type === "while" || $type === "do") $b = $b[2];
-            elseif ($type === "for" || $type === "for-in") $b = $b[4];
+            elseif ($type === "for" || $type === "for-in" || $type === "for-of") $b = $b[4];
             else break;
         }
         return $make($th);
@@ -1908,9 +1942,67 @@ $gen_code = function ($ast, $options = []) use (
         if ($name) {
             $out .= " " . $make_name($name);
         }
-        $out .= "(" . $add_commas($MAP($args, $make_name)) . ")";
+        $out .= "(";
+        foreach($MAP($args, $make_name) as $i => $arg){
+            if($i > 0 && $arg[0] != "="){   //Only add a comma before this argument if it's not the first argument and if the argument isn't an optional value (optional values are stored as arguments starting with an = sign)
+                $out .= ",";
+            }
+            $out .= $arg;
+        }
+        $out .= ")";
         $out = $add_spaces([ $out, $make_block($body) ]);
         return (!$no_parens && $needs_parens($_this_0)) ? "(" . $out . ")" : $out;
+    };
+
+    $make_arrow_function = function ($_this_0, $name, $args, $body, $keyword = '', $no_parens = false) use (
+        $MAP,
+        $make_name,
+        $add_spaces,
+        $add_commas,
+        $needs_parens,
+        &$make_block
+    ) {
+        $out = "";
+        if ($name) {
+            $out .= $make_name($name);
+        }
+        $out .= "(";
+        foreach($MAP($args, $make_name) as $i => $arg){
+            if($i > 0 && $arg[0] != "="){   //Only add a comma before this argument if it's not the first argument and if the argument isn't an optional value (optional values are stored as arguments starting with an = sign)
+                $out .= ",";
+            }
+            $out .= $arg;
+        }
+        $out .= ")=>";
+        $bodyText = $make_block($body);
+        if(preg_match("/^(\s|\\n)*\{(\s|\\n)*return/", $bodyText)){ //Replace stuff like foo=>{return bar} with foo=>bar
+            $bodyText = preg_replace("/^(\s|\\n)*\{(\s|\\n)*return|\}(\s|\\n)*$/", "", $bodyText);
+        }
+        $out = $add_spaces([ $out, $bodyText ]);
+        return (!$no_parens && $needs_parens($_this_0)) ? "(" . $out . ")" : $out;
+    };
+
+    $make_class = function($_this_0, $name, $extends, $body) use (
+        $make_name,
+        $make
+    ){
+        $out = "class";
+        if($name){
+            $out .= " " . $make_name($name);
+        }
+        if(isset($extends[0])){
+            $out .= " extends " . $extends[0];
+        }
+        $out .= "{";
+        foreach($body as $method){
+            if(is_string($method)){ //get, set, static
+                $out .= $method . " ";
+            }
+            else{
+                $out .= preg_replace("/^function\s+(method\s+)?/", "", $make($method));
+            }
+        }
+        return $out . "}";
     };
 
     $must_has_semicolon = function ($node) use ($empty, &$must_has_semicolon) {
@@ -1920,6 +2012,7 @@ $gen_code = function ($ast, $options = []) use (
             return $empty($node[2]) || $must_has_semicolon($node[2]);
           case "for":
           case "for-in":
+          case "for-of":
             return $empty($node[4]) || $must_has_semicolon($node[4]);
           case "if":
             if ($empty($node[2]) && !$node[3]) return true; // `if' with empty `then' and no `else'
@@ -2029,6 +2122,9 @@ $gen_code = function ($ast, $options = []) use (
         "var" => function($_this_0, $defs) use ($MAP, $add_commas, $make_1vardef) {
             return "var " . $add_commas($MAP($defs, $make_1vardef)) . ";";
         },
+        "let" => function($_this_0, $defs) use ($MAP, $add_commas, $make_1vardef) {
+            return "let " . $add_commas($MAP($defs, $make_1vardef)) . ";";
+        },
         "const" => function($_this_0, $defs) use ($MAP, $add_commas, $make_1vardef) {
             return "const " . $add_commas($MAP($defs, $make_1vardef)) . ";";
         },
@@ -2116,7 +2212,9 @@ $gen_code = function ($ast, $options = []) use (
             })) . ")";
         },
         "function" => $make_function,
+        "arrowfunction" => $make_arrow_function,
         "defun" => $make_function,
+        "class" => $make_class,
         "if" => function($_this_0, $co, $th, $el) use ($make, $add_spaces, $make_then) {
             $out = [ "if", "(" . $make($co) . ")", $el ? $make_then($th) : $make($th) ];
             if ($el) {
@@ -2138,6 +2236,12 @@ $gen_code = function ($ast, $options = []) use (
             return $add_spaces([ "for", "(" .
                                  ($vvar ? preg_replace('/;+$/', '', $make($vvar)) : $make($key)),
                                  "in",
+                                 $make($hash) . ")", $make($block) ]);
+        },
+        "for-of" => function($_this_0, $vvar, $key, $hash, $block) use ($make, $add_spaces) {
+            return $add_spaces([ "for", "(" .
+                                 ($vvar ? preg_replace('/;+$/', '', $make($vvar)) : $make($key)),
+                                 "of",
                                  $make($hash) . ")", $make($block) ]);
         },
         "while" => function($_this_0, $condition, $block) use ($make, $add_spaces) {
